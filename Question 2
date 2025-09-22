@@ -1,0 +1,104 @@
+import numpy as np
+
+# physical constants
+hbar = 1.054571817e-34      # J*s
+m_e  = 9.10938356e-31       # kg
+eV   = 1.602176634e-19      # J
+
+def make_triangular_V(V0_meV, t_nm):
+    """Return a function V(x_array) in SI units (Joules) for the triangular barrier."""
+    V0 = V0_meV * 1e-3 * eV
+    t  = t_nm * 1e-9
+    def Vfunc(x):
+        x = np.asarray(x)
+        V = np.zeros_like(x, dtype=float)
+        mask = (x >= 0) & (x <= t)
+        V[mask] = V0 * (1.0 - (x[mask] / t))
+        return V
+    return Vfunc
+
+def transfer_matrix_transmission(Vfunc, x_left, x_right, dx, E):
+    """
+    Compute Transmission and Reflection using transfer-matrix slicing.
+    - Vfunc: function returning V(x) (Joules) for numpy array x
+    - x_left, x_right: integration domain (meters)
+    - dx: slice width (meters)
+    - E: particle energy (Joules)
+    Returns: (T, R, x, V, M_total)
+    """
+    x = np.arange(x_left, x_right+dx/2, dx)   # include right endpoint
+    V = Vfunc(x)
+    # local complex wavenumbers (allow imaginary for evanescent regions)
+    k = np.sqrt(2.0*m_e*(E - V) + 0j) / hbar
+
+    # start with identity matrix for global transfer matrix (from left->right)
+    M = np.array([[1+0j, 0+0j],
+                  [0+0j, 1+0j]])
+
+    # propagate across each slice: do interface (j->j+1) then propagation in region j+1
+    for j in range(len(x)-1):
+        kj = k[j]
+        kj1 = k[j+1]
+        # avoid division by exactly zero (tiny regularization)
+        if abs(kj) < 1e-30:
+            kj = 1e-30 + 0j
+        if abs(kj1) < 1e-30:
+            kj1 = 1e-30 + 0j
+
+        # interface scattering matrix S_{j->j+1} relates wave amplitudes across boundary
+        q = kj1 / kj
+        S = 0.5 * np.array([[1+q, 1-q],
+                             [1-q, 1+q]], dtype=complex)
+
+        # propagation in region j+1 for distance dx
+        P = np.array([[np.exp(1j*kj1*dx), 0+0j],
+                      [0+0j, np.exp(-1j*kj1*dx)]], dtype=complex)
+
+        # update global M: first interface S then propagation P (we multiply from left)
+        M = P.dot(S).dot(M)
+
+    # M now relates left amplitudes [A_L; B_L] to right amplitudes [A_R; B_R]:
+    # [A_R; B_R] = M * [A_L; B_L]
+    M11, M12 = M[0,0], M[0,1]
+    M21, M22 = M[1,0], M[1,1]
+
+    # On the right we assume only outgoing right-traveling wave -> B_R = 0
+    # So 0 = M21*A_L + M22*B_L  -> B_L/A_L = -M21/M22
+    ratio = -M21 / M22
+    r_amp = ratio                          # reflection amplitude (ratio B_L/A_L)
+    t_amp = M11 + M12 * ratio              # transmitted amplitude A_R/A_L
+
+    # compute flux factor k_right/k_left (real parts used)
+    k_left = k[0]
+    k_right = k[-1]
+    # if left or right are evanescent (k.real <= 0) we still use amplitude-squared
+    if k_left.real > 0 and k_right.real > 0:
+        T = (abs(t_amp)**2) * (k_right.real / k_left.real)
+    else:
+        T = abs(t_amp)**2
+    R = abs(r_amp)**2
+
+    return T, R, x, V, M
+
+def run_examples():
+    # problem parameters
+    V0_meV = 100.0
+    E_meV  = 70.0
+    E = E_meV * 1e-3 * eV
+
+    for t_nm in [5.0, 50.0]:
+        Vfunc = make_triangular_V(V0_meV, t_nm)
+        # choose domain: put plane-wave regions well beyond barrier
+        pad = 50e-9   # 50 nm padding on each side (increase if needed)
+        x_left = -pad
+        x_right = t_nm*1e-9 + pad
+
+        # resolution: smaller dx -> more accurate but slower. Try different dx for convergence.
+        for dx_nm in [0.2, 0.1, 0.05, 0.02]:   # nm
+            dx = dx_nm * 1e-9
+            T, R, x, V, M = transfer_matrix_transmission(Vfunc, x_left, x_right, dx, E)
+            print(f"t = {t_nm:.1f} nm, dx = {dx_nm:.2f} nm -> T = {T:.6g}, R = {R:.6g}, T+R = {T+R:.6g}")
+        print("-"*60)
+
+if __name__ == "__main__":
+    run_examples()
